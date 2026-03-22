@@ -9,7 +9,6 @@ MCP server that gives Claude Code semantic code search over any codebase, runnin
 ### Prerequisites
 
 - Docker
-- Homebrew (for Ollama install)
 
 ### Setup
 
@@ -20,9 +19,9 @@ cd semantic-codesearch
 ```
 
 This will:
-1. Start Postgres + pgvector via Docker
-2. Install Ollama and pull `nomic-embed-text`
-3. Build the MCP server Docker image
+1. Build the MCP server Docker image
+2. Start Postgres + pgvector (and Ollama in Docker if no host Ollama is detected)
+3. Pull the `nomic-embed-text` embedding model
 
 ### Register in Claude Code
 
@@ -30,11 +29,22 @@ This will:
 claude mcp add code-search -- \
   docker run -i --rm \
   --network codesearch \
-  --add-host=host.docker.internal:host-gateway \
   -e MCP_CS_PG_HOST=postgres \
   -e MCP_CS_PG_PORT=5432 \
-  -e MCP_CS_OLLAMA_URL=http://host.docker.internal:11434 \
-  -v "$HOME:$HOME:ro" \
+  -v /path/to/project:/path/to/project:ro \
+  mcp-code-search:latest
+```
+
+Mount only the directories you want to index. To index multiple projects, add multiple `-v` flags:
+
+```bash
+claude mcp add code-search -- \
+  docker run -i --rm \
+  --network codesearch \
+  -e MCP_CS_PG_HOST=postgres \
+  -e MCP_CS_PG_PORT=5432 \
+  -v /path/to/project-a:/path/to/project-a:ro \
+  -v /path/to/project-b:/path/to/project-b:ro \
   mcp-code-search:latest
 ```
 
@@ -48,16 +58,38 @@ Or add to your project's `.mcp.json`:
       "args": [
         "run", "-i", "--rm",
         "--network", "codesearch",
-        "--add-host=host.docker.internal:host-gateway",
         "-e", "MCP_CS_PG_HOST=postgres",
         "-e", "MCP_CS_PG_PORT=5432",
-        "-e", "MCP_CS_OLLAMA_URL=http://host.docker.internal:11434",
-        "-v", "/Users/snorresaether:/Users/snorresaether:ro",
+        "-v", "/path/to/project:/path/to/project:ro",
         "mcp-code-search:latest"
       ]
     }
   }
 }
+```
+
+## Performance: GPU acceleration
+
+By default, `setup.sh` runs Ollama in Docker (CPU only on macOS). For faster indexing on Apple Silicon, install Ollama on the host so it can use the Metal GPU:
+
+```bash
+brew install ollama
+ollama serve   # leave running in a separate terminal
+./scripts/setup.sh   # auto-detects host Ollama and skips the Docker container
+```
+
+The setup script prints the correct `claude mcp add` command for whichever mode it detects. To manually override an existing registration to use host Ollama:
+
+```bash
+claude mcp add code-search -- \
+  docker run -i --rm \
+  --network codesearch \
+  --add-host=host.docker.internal:host-gateway \
+  -e MCP_CS_PG_HOST=postgres \
+  -e MCP_CS_PG_PORT=5432 \
+  -e MCP_CS_OLLAMA_URL=http://host.docker.internal:11434 \
+  -v /path/to/project:/path/to/project:ro \
+  mcp-code-search:latest
 ```
 
 ## Tools
@@ -87,12 +119,12 @@ All via environment variables (defaults work out of the box for local dev):
 | `MCP_CS_PG_DATABASE` | `codesearch` | Database name |
 | `MCP_CS_PG_USER` | `codesearch` | Database user |
 | `MCP_CS_PG_PASSWORD` | `codesearch` | Database password |
-| `MCP_CS_OLLAMA_URL` | `http://localhost:11434` | Ollama API URL |
+| `MCP_CS_OLLAMA_URL` | `http://ollama:11434` | Ollama API URL |
 | `MCP_CS_EMBED_MODEL` | `nomic-embed-text` | Embedding model |
 | `MCP_CS_MAX_FILE_KB` | `512` | Max file size to index (KB) |
 | `MCP_CS_BATCH_SIZE` | `50` | Embedding batch size |
 
-When running in Docker, the setup overrides `MCP_CS_PG_HOST=postgres`, `MCP_CS_PG_PORT=5432`, and `MCP_CS_OLLAMA_URL=http://host.docker.internal:11434` so the container can reach Postgres via the Docker network and Ollama on the host.
+When running in Docker, the setup overrides `MCP_CS_PG_HOST=postgres` and `MCP_CS_PG_PORT=5432` so the container can reach Postgres via the Docker network. By default Ollama runs in Docker Compose on the same network, so the default `MCP_CS_OLLAMA_URL` works without overrides. If using a host-installed Ollama, pass `MCP_CS_OLLAMA_URL=http://host.docker.internal:11434`.
 
 ## Architecture
 
@@ -154,8 +186,8 @@ All indexed codebases share the same database. File paths in results tell you wh
 ### Reset everything
 
 ```bash
-docker compose down -v   # wipes all indexed data
-docker compose up -d     # fresh start
+docker compose --profile ollama down -v   # wipes all indexed data
+docker compose --profile ollama up -d     # fresh start
 ```
 
 ### Indexing speed estimates
@@ -186,19 +218,17 @@ go run . index /path/to/codebase
 ```bash
 docker run --rm \
   --network codesearch \
-  --add-host=host.docker.internal:host-gateway \
   -e MCP_CS_PG_HOST=postgres \
   -e MCP_CS_PG_PORT=5432 \
-  -e MCP_CS_OLLAMA_URL=http://host.docker.internal:11434 \
-  -v "$HOME:$HOME:ro" \
+  -v /path/to/codebase:/path/to/codebase:ro \
   mcp-code-search:latest index /path/to/codebase
 ```
 
 ## Development
 
 ```bash
-# Start infrastructure
-docker compose up -d
+# Start infrastructure (include --profile ollama for Docker Ollama)
+docker compose --profile ollama up -d
 
 # Build locally (requires Go 1.22+ and a C compiler for tree-sitter)
 go build -o mcp-code-search .
