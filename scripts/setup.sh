@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "==> Starting Postgres (pgvector)..."
-docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d
+docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d postgres
 
 echo "==> Waiting for Postgres to be healthy..."
 until docker inspect --format='{{.State.Health.Status}}' mcp-code-search-db 2>/dev/null | grep -q healthy; do
@@ -28,16 +28,23 @@ fi
 echo "==> Pulling nomic-embed-text model..."
 ollama pull nomic-embed-text
 
-echo "==> Building Go binary..."
-cd "$PROJECT_DIR" && go build -o mcp-code-search .
+echo "==> Building MCP server Docker image..."
+docker compose -f "$PROJECT_DIR/docker-compose.yml" build mcp-server
 
 echo ""
 echo "============================================"
 echo "  Setup complete!"
 echo ""
 echo "  Register in Claude Code:"
-echo "    claude mcp add code-search -- $PROJECT_DIR/mcp-code-search"
 echo ""
-echo "  Or add to .mcp.json:"
-echo '    {"mcpServers":{"code-search":{"command":"'$PROJECT_DIR'/mcp-code-search"}}}'
+echo "    claude mcp add code-search -- \\"
+echo "      docker run -i --rm \\"
+echo "      --network codesearch \\"
+echo "      --add-host=host.docker.internal:host-gateway \\"
+echo "      -e MCP_CS_PG_HOST=postgres \\"
+echo "      -e MCP_CS_PG_PORT=5432 \\"
+echo "      -e MCP_CS_OLLAMA_URL=http://host.docker.internal:11434 \\"
+echo "      -v $HOME:$HOME:ro \\"
+echo "      mcp-code-search:latest"
+echo ""
 echo "============================================"
