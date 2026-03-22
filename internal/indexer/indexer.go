@@ -19,8 +19,21 @@ import (
 	"semantic-codesearch/internal/models"
 )
 
+// ProgressFunc is a callback for reporting indexing progress.
+type ProgressFunc func(message string)
+
+// candidateFile holds metadata collected during the scan pass.
+type candidateFile struct {
+	path  string
+	mtime float64
+}
+
 // IndexDirectory walks a directory, chunks files, embeds them, and stores in pgvector.
-func IndexDirectory(ctx context.Context, directory string, cfg config.Config, pool *pgxpool.Pool, embedder *embeddings.Client) (models.IndexResult, error) {
+func IndexDirectory(ctx context.Context, directory string, cfg config.Config, pool *pgxpool.Pool, embedder *embeddings.Client, onProgress ProgressFunc) (models.IndexResult, error) {
+	if onProgress == nil {
+		onProgress = func(string) {}
+	}
+
 	root, err := filepath.Abs(directory)
 	if err != nil {
 		return models.IndexResult{}, fmt.Errorf("resolve path: %w", err)
@@ -33,10 +46,13 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 
 	spec := ignore.BuildIgnoreSpec(root)
 	maxBytes := int64(cfg.MaxFileSizeKB) * 1024
-
-	var filesProcessed, filesSkipped, errors int
-	var errorDetails []models.ErrorDetail
 	startTime := time.Now()
+
+	// Pass 1: scan and collect candidate files
+	onProgress("Scanning files...")
+
+	var candidates []candidateFile
+	var filesSkipped int
 
 	filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -73,89 +89,114 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 			return nil
 		}
 
-		data, err := os.ReadFile(path)
+		candidates = append(candidates, candidateFile{path: path, mtime: mtime})
+		return nil
+	})
+
+	onProgress(fmt.Sprintf("Found %d files to index (%d unchanged, skipping)", len(candidates), filesSkipped))
+
+	// Pass 2: process each candidate file
+	var filesProcessed, totalChunks, errors int
+	var errorDetails []models.ErrorDetail
+
+	for i, cf := range candidates {
+		relPath, _ := filepath.Rel(root, cf.path)
+		if relPath == "" {
+			relPath = cf.path
+		}
+		onProgress(fmt.Sprintf("Embedding file %d/%d: %s", i+1, len(candidates), relPath))
+
+		data, err := os.ReadFile(cf.path)
 		if err != nil {
 			errors++
-			errorDetails = append(errorDetails, models.ErrorDetail{File: path, Error: err.Error()})
-			return nil
+			errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
+			continue
 		}
 
 		content := string(data)
-		chunks := chunker.ChunkFile(content, path)
+		chunks := chunker.ChunkFile(content, cf.path)
 		if len(chunks) == 0 {
-			return nil
+			continue
 		}
 
 		// Prepare texts for embedding
 		texts := make([]string, len(chunks))
-		for i, c := range chunks {
-			texts[i] = chunker.FormatChunkForEmbedding(c, path)
+		for j, c := range chunks {
+			texts[j] = chunker.FormatChunkForEmbedding(c, cf.path)
 		}
 
 		// Embed in batches
 		var allEmbeddings [][]float32
-		for i := 0; i < len(texts); i += cfg.BatchSize {
-			end := i + cfg.BatchSize
+		embErr := false
+		for j := 0; j < len(texts); j += cfg.BatchSize {
+			end := j + cfg.BatchSize
 			if end > len(texts) {
 				end = len(texts)
 			}
-			batch, err := embedder.EmbedBatch(texts[i:end])
+			batch, err := embedder.EmbedBatch(texts[j:end])
 			if err != nil {
 				errors++
-				errorDetails = append(errorDetails, models.ErrorDetail{File: path, Error: err.Error()})
-				return nil
+				errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
+				embErr = true
+				break
 			}
 			allEmbeddings = append(allEmbeddings, batch...)
 		}
+		if embErr {
+			continue
+		}
 
 		fileHash := fmt.Sprintf("%x", sha256.Sum256(data))
-		lang := chunker.DetectLanguage(path)
+		lang := chunker.DetectLanguage(cf.path)
 
 		// Store in a transaction
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			errors++
-			errorDetails = append(errorDetails, models.ErrorDetail{File: path, Error: err.Error()})
-			return nil
+			errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
+			continue
 		}
 
-		fileID, err := db.UpsertFile(ctx, tx, path, mtime, fileHash, lang)
+		fileID, err := db.UpsertFile(ctx, tx, cf.path, cf.mtime, fileHash, lang)
 		if err != nil {
 			tx.Rollback(ctx)
 			errors++
-			errorDetails = append(errorDetails, models.ErrorDetail{File: path, Error: err.Error()})
-			return nil
+			errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
+			continue
 		}
 
 		chunkRecords := make([]db.ChunkRecord, len(chunks))
-		for i, c := range chunks {
-			chunkRecords[i] = db.ChunkRecord{
-				ChunkIndex: i,
+		for j, c := range chunks {
+			chunkRecords[j] = db.ChunkRecord{
+				ChunkIndex: j,
 				StartLine:  c.StartLine,
 				EndLine:    c.EndLine,
 				ChunkType:  c.ChunkType,
 				SymbolName: c.SymbolName,
 				Content:    c.Content,
-				Embedding:  allEmbeddings[i],
+				Embedding:  allEmbeddings[j],
 			}
 		}
 
 		if err := db.InsertChunks(ctx, tx, fileID, chunkRecords); err != nil {
 			tx.Rollback(ctx)
 			errors++
-			errorDetails = append(errorDetails, models.ErrorDetail{File: path, Error: err.Error()})
-			return nil
+			errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
+			continue
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			errors++
-			errorDetails = append(errorDetails, models.ErrorDetail{File: path, Error: err.Error()})
-			return nil
+			errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
+			continue
 		}
 
 		filesProcessed++
-		return nil
-	})
+		totalChunks += len(chunks)
+	}
+
+	elapsed := time.Since(startTime).Seconds()
+	onProgress(fmt.Sprintf("Indexing complete: %d files, %d chunks, %.1fs elapsed", filesProcessed, totalChunks, elapsed))
 
 	// Record the run
 	db.RecordIndexRun(ctx, pool, root, filesProcessed, filesSkipped, errors, errorDetails)
@@ -165,6 +206,6 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 		FilesSkipped:   filesSkipped,
 		Errors:         errors,
 		ErrorDetails:   errorDetails,
-		Elapsed:        time.Since(startTime).Seconds(),
+		Elapsed:        elapsed,
 	}, nil
 }

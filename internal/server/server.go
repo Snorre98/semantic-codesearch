@@ -42,14 +42,19 @@ func Run(cfg config.Config) error {
 				mcp.Description("Absolute path to the codebase directory to index."),
 			),
 		),
-		func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		func(toolCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := request.GetArguments()
 			directory, _ := args["directory"].(string)
 			if directory == "" {
 				return mcp.NewToolResultError("directory parameter is required"), nil
 			}
 
-			result, err := indexer.IndexDirectory(ctx, directory, cfg, pool, embedder)
+			onProgress := func(msg string) {
+				notification := mcp.NewLoggingMessageNotification(mcp.LoggingLevelInfo, "indexer", msg)
+				s.SendLogMessageToClient(toolCtx, notification)
+			}
+
+			result, err := indexer.IndexDirectory(toolCtx, directory, cfg, pool, embedder, onProgress)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
 			}
