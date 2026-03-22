@@ -171,6 +171,29 @@ The bottleneck is Ollama embedding. With `nomic-embed-text` on Apple Silicon:
 
 Re-indexing after small changes takes seconds regardless of total codebase size.
 
+## Manual Indexing
+
+You can index codebases directly from the command line without going through the MCP server.
+
+### Local dev
+
+```bash
+go run . index /path/to/codebase
+```
+
+### Docker
+
+```bash
+docker run --rm \
+  --network codesearch \
+  --add-host=host.docker.internal:host-gateway \
+  -e MCP_CS_PG_HOST=postgres \
+  -e MCP_CS_PG_PORT=5432 \
+  -e MCP_CS_OLLAMA_URL=http://host.docker.internal:11434 \
+  -v "$HOME:$HOME:ro" \
+  mcp-code-search:latest index /path/to/codebase
+```
+
 ## Development
 
 ```bash
