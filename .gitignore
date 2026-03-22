@@ -1,5 +1,6 @@
-# Go binary
+# Go binaries
 mcp-code-search
+semantic-codesearch
 *.exe
 *.test
 *.out
