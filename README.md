@@ -64,7 +64,7 @@ Or add to your project's `.mcp.json`:
 
 ### `index_codebase(directory)`
 
-Index a codebase for semantic search. Walks the directory, respects `.gitignore`, chunks files intelligently (AST for Go, heuristics for other languages, fixed-size fallback), and stores embeddings in pgvector.
+Index a codebase for semantic search. Walks the directory, respects `.gitignore`, chunks files using tree-sitter AST parsing for accurate function/class/method extraction across 14+ languages, and stores embeddings in pgvector.
 
 Supports **incremental re-indexing** — unchanged files are skipped automatically.
 
@@ -200,9 +200,17 @@ docker run --rm \
 # Start infrastructure
 docker compose up -d
 
-# Build locally (requires Go 1.22+)
+# Build locally (requires Go 1.22+ and a C compiler for tree-sitter)
 go build -o mcp-code-search .
 
 # Run tests
 go test ./...
 ```
+
+### Build requirements
+
+The chunker uses [tree-sitter](https://tree-sitter.github.io/) via CGo for AST-based code parsing. This requires a C compiler (gcc/clang) at build time. On macOS this is included with Xcode Command Line Tools; on Linux install `build-essential` or equivalent. The Docker build handles this automatically.
+
+### Supported languages (tree-sitter)
+
+Go, Python, JavaScript, TypeScript, Rust, Java, C, C++, Ruby, PHP, C#, Swift, Kotlin, Scala, Shell. Unsupported file types fall back to fixed-size chunking.
