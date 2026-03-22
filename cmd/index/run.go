@@ -24,7 +24,11 @@ func Run(directory string) error {
 
 	embedder := embeddings.NewClient(cfg)
 
-	result, err := indexer.IndexDirectory(ctx, directory, cfg, pool, embedder)
+	onProgress := func(msg string) {
+		fmt.Fprintf(os.Stderr, "%s\n", msg)
+	}
+
+	result, err := indexer.IndexDirectory(ctx, directory, cfg, pool, embedder, onProgress)
 	if err != nil {
 		return fmt.Errorf("indexing failed: %w", err)
 	}
