@@ -28,16 +28,16 @@ fi
 echo "==> Pulling nomic-embed-text model..."
 ollama pull nomic-embed-text
 
-echo "==> Installing Python package (editable)..."
-python3 -m pip install -e "$PROJECT_DIR"
+echo "==> Building Go binary..."
+cd "$PROJECT_DIR" && go build -o mcp-code-search .
 
 echo ""
 echo "============================================"
 echo "  Setup complete!"
 echo ""
 echo "  Register in Claude Code:"
-echo "    claude mcp add code-search -e PYTHONUNBUFFERED=1 -- mcp-code-search"
+echo "    claude mcp add code-search -- $PROJECT_DIR/mcp-code-search"
 echo ""
 echo "  Or add to .mcp.json:"
-echo '    {"mcpServers":{"code-search":{"command":"mcp-code-search","env":{"PYTHONUNBUFFERED":"1"}}}}'
+echo '    {"mcpServers":{"code-search":{"command":"'$PROJECT_DIR'/mcp-code-search"}}}'
 echo "============================================"

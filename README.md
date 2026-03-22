@@ -2,14 +2,14 @@
 
 MCP server that gives Claude Code semantic code search over any codebase, running 100% locally.
 
-**Stack:** Postgres + pgvector | Ollama (nomic-embed-text) | Python (FastMCP)
+**Stack:** Postgres + pgvector | Ollama (nomic-embed-text) | Go (mcp-go)
 
 ## Quick Start
 
 ### Prerequisites
 
 - Docker
-- Python 3.10+
+- Go 1.22+
 - Homebrew (for Ollama install)
 
 ### Setup
@@ -23,12 +23,12 @@ cd semantic-codesearch
 This will:
 1. Start Postgres + pgvector via Docker
 2. Install Ollama and pull `nomic-embed-text`
-3. Install the Python package in editable mode
+3. Build the Go binary
 
 ### Register in Claude Code
 
 ```bash
-claude mcp add code-search -e PYTHONUNBUFFERED=1 -- mcp-code-search
+claude mcp add code-search -- /path/to/mcp-code-search
 ```
 
 Or add to your project's `.mcp.json`:
@@ -37,10 +37,7 @@ Or add to your project's `.mcp.json`:
 {
   "mcpServers": {
     "code-search": {
-      "command": "mcp-code-search",
-      "env": {
-        "PYTHONUNBUFFERED": "1"
-      }
+      "command": "/path/to/mcp-code-search"
     }
   }
 }
@@ -50,7 +47,7 @@ Or add to your project's `.mcp.json`:
 
 ### `index_codebase(directory)`
 
-Index a codebase for semantic search. Walks the directory, respects `.gitignore`, chunks files intelligently (AST for Python, heuristics for other languages, fixed-size fallback), and stores embeddings in pgvector.
+Index a codebase for semantic search. Walks the directory, respects `.gitignore`, chunks files intelligently (AST for Go, heuristics for other languages, fixed-size fallback), and stores embeddings in pgvector.
 
 Supports **incremental re-indexing** — unchanged files are skipped automatically.
 
@@ -99,9 +96,9 @@ All via environment variables (defaults work out of the box):
 # Start infrastructure
 docker compose up -d
 
-# Install in editable mode with dev deps
-pip install -e ".[dev]"
+# Build
+go build -o mcp-code-search .
 
 # Run tests
-pytest
+go test ./...
 ```
