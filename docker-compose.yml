@@ -19,6 +19,21 @@ services:
     networks:
       - codesearch
 
+  ollama:
+    image: ollama/ollama
+    container_name: mcp-code-search-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - codesearch
+    profiles:
+      - ollama
+
   mcp-server:
     build: .
     image: mcp-code-search:latest
@@ -28,7 +43,6 @@ services:
     environment:
       MCP_CS_PG_HOST: postgres
       MCP_CS_PG_PORT: "5432"
-      MCP_CS_OLLAMA_URL: http://host.docker.internal:11434
     stdin_open: true
     networks:
       - codesearch
@@ -38,6 +52,8 @@ services:
 volumes:
   pgdata:
     name: mcp-codesearch-pgdata
+  ollama_data:
+    name: mcp-codesearch-ollama-data
 
 networks:
   codesearch:

@@ -27,7 +27,7 @@ func Load() Config {
 		PGDatabase:     envOr("MCP_CS_PG_DATABASE", "codesearch"),
 		PGUser:         envOr("MCP_CS_PG_USER", "codesearch"),
 		PGPassword:     envOr("MCP_CS_PG_PASSWORD", "codesearch"),
-		OllamaBaseURL:  envOr("MCP_CS_OLLAMA_URL", "http://localhost:11434"),
+		OllamaBaseURL:  envOr("MCP_CS_OLLAMA_URL", "http://ollama:11434"),
 		EmbeddingModel: envOr("MCP_CS_EMBED_MODEL", "nomic-embed-text"),
 		MaxFileSizeKB:  envOrInt("MCP_CS_MAX_FILE_KB", 512),
 		BatchSize:      envOrInt("MCP_CS_BATCH_SIZE", 50),

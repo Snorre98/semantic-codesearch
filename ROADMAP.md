@@ -2,9 +2,9 @@
 
 Future extensions for mcp-code-search, roughly ordered by impact and complexity.
 
-## Tree-sitter Chunking
+## ~~Tree-sitter Chunking~~ (Done)
 
-Replace heuristic regex chunking with [tree-sitter](https://tree-sitter.github.io/) for proper multi-language AST parsing. One dependency (`github.com/smacker/go-tree-sitter`) gives accurate function/class extraction for 40+ languages instead of hand-written regexes. Biggest single quality improvement for search results.
+Implemented. Uses `github.com/smacker/go-tree-sitter` for AST-based chunking across 15 languages.
 
 ## Search Filters
 
@@ -35,3 +35,4 @@ New MCP tool: given a file path and line range, find code similar to that snippe
 ## Web UI
 
 Add an HTTP transport alongside stdio so the search can be used from a browser. A small embedded web server with a search box, results list with syntax highlighting, and links to open files in the editor. Could run on a local port (e.g., `localhost:9876`) when started with a `--http` flag.
+
