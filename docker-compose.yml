@@ -6,8 +6,8 @@ services:
       POSTGRES_DB: codesearch
       POSTGRES_USER: codesearch
       POSTGRES_PASSWORD: codesearch
-    ports:
-      - "5433:5432"
+    # No host port mapping — only accessible via Docker network.
+    # Uncomment for local debugging: ports: ["5433:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
