@@ -16,7 +16,30 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - codesearch
+
+  mcp-server:
+    build: .
+    image: mcp-code-search:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MCP_CS_PG_HOST: postgres
+      MCP_CS_PG_PORT: "5432"
+      MCP_CS_OLLAMA_URL: http://host.docker.internal:11434
+    stdin_open: true
+    networks:
+      - codesearch
+    profiles:
+      - build-only
 
 volumes:
   pgdata:
     name: mcp-codesearch-pgdata
+
+networks:
+  codesearch:
+    name: codesearch
+    driver: bridge
