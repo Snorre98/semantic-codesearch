@@ -59,8 +59,11 @@ func Run(cfg config.Config) error {
 				return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
 			}
 
-			msg := fmt.Sprintf("Indexed %d files (%d unchanged, %d errors) in %.1fs",
-				result.FilesProcessed, result.FilesSkipped, result.Errors, result.Elapsed)
+			msg := fmt.Sprintf("Indexed %d files (%d unchanged, %d errors), %d chunks, %d batches in %.1fs | walk=%.1fs chunk=%.1fs embed=%.1fs db=%.1fs | model=%s batch=%d",
+				result.FilesProcessed, result.FilesSkipped, result.Errors,
+				result.TotalChunks, result.TotalBatches, result.Elapsed,
+				result.WalkDuration, result.ChunkDuration, result.EmbedDuration, result.DBDuration,
+				result.Model, result.BatchSize)
 			return mcp.NewToolResultText(msg), nil
 		},
 	)
