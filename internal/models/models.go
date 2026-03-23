@@ -27,6 +27,14 @@ type IndexResult struct {
 	Errors         int
 	ErrorDetails   []ErrorDetail
 	Elapsed        float64
+	TotalChunks    int
+	TotalBatches   int
+	WalkDuration   float64
+	ChunkDuration  float64
+	EmbedDuration  float64
+	DBDuration     float64
+	Model          string
+	BatchSize      int
 }
 
 // ErrorDetail records a per-file indexing error.
