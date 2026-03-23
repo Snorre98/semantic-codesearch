@@ -120,17 +120,30 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 
 	onProgress(fmt.Sprintf("Found %d files to index (%d unchanged, skipping)", len(candidates), filesSkipped))
 
-	// Pass 2: process each candidate file
+	// Pass 2: chunk all candidate files
+	type fileChunks struct {
+		cf       candidateFile
+		relPath  string
+		data     []byte
+		chunks   []models.CodeChunk
+		texts    []string
+		fileHash string
+		lang     string
+	}
+
+	var chunkedFiles []fileChunks
+	var totalTexts []string            // all embedding texts, flattened
+	var textFileIndex []int            // maps each text index → chunkedFiles index
 	var filesProcessed, totalChunks, totalBatches, errors int
 	var errorDetails []models.ErrorDetail
 	var chunkDuration, embedDuration, dbDuration time.Duration
 
-	for i, cf := range candidates {
+	chunkStart := time.Now()
+	for _, cf := range candidates {
 		relPath, _ := filepath.Rel(root, cf.path)
 		if relPath == "" {
 			relPath = cf.path
 		}
-		onProgress(fmt.Sprintf("Embedding file %d/%d: %s", i+1, len(candidates), relPath))
 
 		data, err := os.ReadFile(cf.path)
 		if err != nil {
@@ -139,12 +152,8 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 			continue
 		}
 
-		// Chunking phase
-		chunkStart := time.Now()
-		content := string(data)
-		chunks := chunker.ChunkFile(content, cf.path)
+		chunks := chunker.ChunkFile(string(data), cf.path)
 		if len(chunks) == 0 {
-			chunkDuration += time.Since(chunkStart)
 			continue
 		}
 
@@ -152,62 +161,83 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 		for j, c := range chunks {
 			texts[j] = chunker.FormatChunkForEmbedding(c, cf.path)
 		}
-		chunkDuration += time.Since(chunkStart)
 
-		// Embedding phase
-		embedStart := time.Now()
-		var allEmbeddings [][]float32
-		embErr := false
-		for j := 0; j < len(texts); j += cfg.BatchSize {
-			end := j + cfg.BatchSize
-			if end > len(texts) {
-				end = len(texts)
-			}
-			totalBatches++
-			batch, err := embedder.EmbedBatch(texts[j:end])
-			if err != nil {
-				errors++
-				errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
-				embErr = true
-				break
-			}
-			allEmbeddings = append(allEmbeddings, batch...)
+		fileIdx := len(chunkedFiles)
+		chunkedFiles = append(chunkedFiles, fileChunks{
+			cf:       cf,
+			relPath:  relPath,
+			data:     data,
+			chunks:   chunks,
+			texts:    texts,
+			fileHash: fmt.Sprintf("%x", sha256.Sum256(data)),
+			lang:     chunker.DetectLanguage(cf.path),
+		})
+
+		for range texts {
+			textFileIndex = append(textFileIndex, fileIdx)
 		}
-		fileEmbedDuration := time.Since(embedStart)
-		embedDuration += fileEmbedDuration
-		if embErr {
-			continue
+		totalTexts = append(totalTexts, texts...)
+	}
+	chunkDuration = time.Since(chunkStart)
+
+	onProgress(fmt.Sprintf("Chunked %d files into %d chunks, embedding...", len(chunkedFiles), len(totalTexts)))
+
+	// Pass 3: embed all chunks in proper batches across files
+	allEmbeddings := make([][]float32, len(totalTexts))
+	embedStart := time.Now()
+	embErr := false
+	for i := 0; i < len(totalTexts); i += cfg.BatchSize {
+		end := i + cfg.BatchSize
+		if end > len(totalTexts) {
+			end = len(totalTexts)
 		}
+		totalBatches++
+		onProgress(fmt.Sprintf("Embedding batch %d/%d (%d chunks)", totalBatches, (len(totalTexts)+cfg.BatchSize-1)/cfg.BatchSize, end-i))
 
-		// Per-file slow log
-		if fileEmbedDuration.Seconds() > 2.0 {
-			log.Printf("[index] slow: %s embed=%.1fs (%d chunks)", relPath, fileEmbedDuration.Seconds(), len(chunks))
+		batch, err := embedder.EmbedBatch(totalTexts[i:end])
+		if err != nil {
+			errors++
+			errorDetails = append(errorDetails, models.ErrorDetail{File: "batch-embed", Error: err.Error()})
+			embErr = true
+			break
 		}
+		copy(allEmbeddings[i:end], batch)
+	}
+	embedDuration = time.Since(embedStart)
 
-		fileHash := fmt.Sprintf("%x", sha256.Sum256(data))
-		lang := chunker.DetectLanguage(cf.path)
+	if embErr {
+		// Return partial results — no embeddings available
+		elapsed := time.Since(startTime).Seconds()
+		return models.IndexResult{Errors: errors, ErrorDetails: errorDetails, Elapsed: elapsed}, nil
+	}
 
-		// DB phase
+	// Pass 4: store each file's chunks with their embeddings
+	embOffset := 0
+	for _, fc := range chunkedFiles {
+		n := len(fc.chunks)
+
 		dbStart := time.Now()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			dbDuration += time.Since(dbStart)
 			errors++
-			errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
+			errorDetails = append(errorDetails, models.ErrorDetail{File: fc.cf.path, Error: err.Error()})
+			embOffset += n
 			continue
 		}
 
-		fileID, err := db.UpsertFile(ctx, tx, cf.path, cf.mtime, fileHash, lang)
+		fileID, err := db.UpsertFile(ctx, tx, fc.cf.path, fc.cf.mtime, fc.fileHash, fc.lang)
 		if err != nil {
 			tx.Rollback(ctx)
 			dbDuration += time.Since(dbStart)
 			errors++
-			errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
+			errorDetails = append(errorDetails, models.ErrorDetail{File: fc.cf.path, Error: err.Error()})
+			embOffset += n
 			continue
 		}
 
-		chunkRecords := make([]db.ChunkRecord, len(chunks))
-		for j, c := range chunks {
+		chunkRecords := make([]db.ChunkRecord, n)
+		for j, c := range fc.chunks {
 			chunkRecords[j] = db.ChunkRecord{
 				ChunkIndex: j,
 				StartLine:  c.StartLine,
@@ -215,7 +245,7 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 				ChunkType:  c.ChunkType,
 				SymbolName: c.SymbolName,
 				Content:    c.Content,
-				Embedding:  allEmbeddings[j],
+				Embedding:  allEmbeddings[embOffset+j],
 			}
 		}
 
@@ -223,20 +253,23 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 			tx.Rollback(ctx)
 			dbDuration += time.Since(dbStart)
 			errors++
-			errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
+			errorDetails = append(errorDetails, models.ErrorDetail{File: fc.cf.path, Error: err.Error()})
+			embOffset += n
 			continue
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			dbDuration += time.Since(dbStart)
 			errors++
-			errorDetails = append(errorDetails, models.ErrorDetail{File: cf.path, Error: err.Error()})
+			errorDetails = append(errorDetails, models.ErrorDetail{File: fc.cf.path, Error: err.Error()})
+			embOffset += n
 			continue
 		}
 		dbDuration += time.Since(dbStart)
 
 		filesProcessed++
-		totalChunks += len(chunks)
+		totalChunks += n
+		embOffset += n
 	}
 
 	elapsed := time.Since(startTime).Seconds()

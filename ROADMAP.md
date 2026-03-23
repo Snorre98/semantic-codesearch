@@ -54,6 +54,14 @@ Postgres+pgvector is overkill for a single-user tool on one machine. Replace wit
 - `sqlite-vss` — uses Faiss under the hood. More mature, heavier.
 - Brute-force scan — for a single repo (<100K chunks), computing cosine similarity across all vectors in memory takes milliseconds. Might not even need a vector index.
 
+**Per-project index:**
+- Store the index at `.codesearch/index.db` inside the project directory — same pattern as `.git/`.
+- The tool finds it by walking up from the current directory looking for `.codesearch/index.db`. No config, no paths to pass.
+- Add `.codesearch/` to `.gitignore` by default since vectors are model-specific. Teams that standardize on the same embedding model could commit it for instant search on clone.
+- Solves multi-project scoping for free — each project has its own isolated index. No `project` column needed.
+- Deleting a project deletes its index. No orphaned data in a shared database.
+- Eliminates the Docker volume mount problem entirely — the binary reads the project directory directly.
+
 **Migration path:**
 - Abstract storage behind an interface in `internal/db/` — `Store` interface with `UpsertFile`, `InsertChunks`, `Search`, etc.
 - Default to SQLite for local use.
@@ -70,9 +78,9 @@ Add optional parameters to `search_code`:
 
 Requires adding `WHERE` clauses to the similarity query and indexing the `language`/`chunk_type` columns.
 
-## Multi-Project Support
+## ~~Multi-Project Support~~ (Solved by SQLite per-project index)
 
-Add a `project` column to `indexed_files` to scope searches to a specific codebase. Enables indexing multiple repos without cross-contamination in results. `index_codebase` would accept an optional project name, `search_code` would accept an optional project filter.
+Per-project `.codesearch/index.db` gives natural isolation — no `project` column needed. Each repo has its own index. For the GitHub App (shared Postgres), a `project` column would still be needed.
 
 ## Auto-Reindex
 
