@@ -20,8 +20,11 @@ services:
       - codesearch
 
   ollama:
-    image: ollama/ollama
+    image: ollama/ollama:rocm
     container_name: mcp-code-search-ollama
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
