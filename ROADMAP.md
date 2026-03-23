@@ -39,6 +39,40 @@ Future extensions for mcp-code-search, roughly ordered by impact and complexity.
 
 Implemented. Uses `github.com/smacker/go-tree-sitter` for AST-based chunking across 15 languages.
 
+## Chunk Size vs Embedding Context Window
+
+The embedding model (`nomic-embed-text`) has an ~8192 token context window. Chunks that exceed this fail at embed time. Currently we truncate texts to 30K chars as a rough safety net and retry failed chunks individually, but 117 errors on a real codebase (example-repo backend, 810 files) suggests the truncation threshold is too generous or some chunks are legitimately too large.
+
+**Needs investigation:**
+- Are the errors from genuinely oversized chunks (large classes/functions that tree-sitter doesn't split), or from the `FormatChunkForEmbedding` header pushing borderline chunks over the limit?
+- Should `MaxChunkLines` (currently 100) be lowered, or should truncation be token-aware rather than char-based?
+- Consider using a tokenizer to count actual tokens before sending to Ollama, and splitting at the token level.
+
+### Fix options
+
+**Option 1: Tighter chunk limits (quick fix)** — Lower `MaxChunkLines` from 100 to 60-70. Java files tend to have long lines with annotations, generics, etc. — 100 lines of Java can easily blow past 8192 tokens. Minimal code change, addresses most failures.
+
+**Option 2: Model with a larger context window** — Most embedding models have *shorter* context windows than nomic:
+- `nomic-embed-text` — 8192 tokens (current)
+- `mxbai-embed-large` — 512 tokens (worse, not better)
+- `snowflake-arctic-embed:335m` — 512 tokens
+- `jina/jina-embeddings-v2-base-code` — 8192 tokens, specifically trained on code
+
+We're already using one of the longest context windows available. Switching models doesn't solve this — the answer is keeping chunks within the window.
+
+**Option 3: Smart truncation (the right fix)** — Instead of a crude char limit, count tokens properly. `nomic-embed-text` uses a BERT tokenizer where ~1 token ≈ 4 chars for code. Set the limit to ~7500 tokens worth (~30K chars) and truncate at a line boundary so you don't cut mid-statement. The current 30K char truncation is close but the 117 errors suggest some chunks have very long lines or the `FormatChunkForEmbedding` header pushes them over. Lowering to ~24K chars (6000 tokens, leaving headroom for the header) and cutting at the nearest newline would likely eliminate all errors.
+
+### Cross-file batching benchmark (example-repo backend, 2026-03-23)
+
+| Metric | Per-file batching | Cross-file batching |
+|--------|-------------------|---------------------|
+| Batches | 2,256 | 40 |
+| Embed time | 237.5s | 162.3s |
+| DB time | 17.8s | 2.5s |
+| Total | 258.6s | 165.5s |
+
+~36% faster overall. Batches dropped from 2,256 to 40 — HTTP overhead eliminated. Embed time is still 98% of total — pure model inference, only reducible by faster GPU, smaller model, or concurrent batch requests.
+
 ## SQLite as Default Storage
 
 Postgres+pgvector is overkill for a single-user tool on one machine. Replace with SQLite as the default storage backend — zero setup, no server process, the index is just a file.

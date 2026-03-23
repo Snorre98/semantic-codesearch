@@ -182,34 +182,51 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 
 	onProgress(fmt.Sprintf("Chunked %d files into %d chunks, embedding...", len(chunkedFiles), len(totalTexts)))
 
-	// Pass 3: embed all chunks in proper batches across files
+	// Truncate texts that exceed the embedding model's context window.
+	// nomic-embed-text supports ~8192 tokens; ~4 chars/token gives ~32K chars max.
+	const maxCharsPerText = 30000
+	for i, t := range totalTexts {
+		if len(t) > maxCharsPerText {
+			totalTexts[i] = t[:maxCharsPerText]
+		}
+	}
+
+	// Pass 3: embed all chunks in proper batches across files.
+	// On batch failure, fall back to embedding one-by-one to isolate bad chunks.
 	allEmbeddings := make([][]float32, len(totalTexts))
 	embedStart := time.Now()
-	embErr := false
+	totalBatchCount := (len(totalTexts) + cfg.BatchSize - 1) / cfg.BatchSize
 	for i := 0; i < len(totalTexts); i += cfg.BatchSize {
 		end := i + cfg.BatchSize
 		if end > len(totalTexts) {
 			end = len(totalTexts)
 		}
 		totalBatches++
-		onProgress(fmt.Sprintf("Embedding batch %d/%d (%d chunks)", totalBatches, (len(totalTexts)+cfg.BatchSize-1)/cfg.BatchSize, end-i))
+		onProgress(fmt.Sprintf("Embedding batch %d/%d (%d chunks)", totalBatches, totalBatchCount, end-i))
 
 		batch, err := embedder.EmbedBatch(totalTexts[i:end])
 		if err != nil {
-			errors++
-			errorDetails = append(errorDetails, models.ErrorDetail{File: "batch-embed", Error: err.Error()})
-			embErr = true
-			break
+			// Batch failed — retry each chunk individually to skip only the bad ones
+			log.Printf("[index] batch %d failed (%v), retrying individually", totalBatches, err)
+			for j := i; j < end; j++ {
+				single, err2 := embedder.EmbedBatch(totalTexts[j : j+1])
+				if err2 != nil {
+					errors++
+					fileIdx := textFileIndex[j]
+					errorDetails = append(errorDetails, models.ErrorDetail{
+						File:  chunkedFiles[fileIdx].relPath,
+						Error: fmt.Sprintf("chunk embed failed: %v", err2),
+					})
+					// Leave allEmbeddings[j] as nil — will be skipped during DB insert
+					continue
+				}
+				allEmbeddings[j] = single[0]
+			}
+			continue
 		}
 		copy(allEmbeddings[i:end], batch)
 	}
 	embedDuration = time.Since(embedStart)
-
-	if embErr {
-		// Return partial results — no embeddings available
-		elapsed := time.Since(startTime).Seconds()
-		return models.IndexResult{Errors: errors, ErrorDetails: errorDetails, Elapsed: elapsed}, nil
-	}
 
 	// Pass 4: store each file's chunks with their embeddings
 	embOffset := 0
@@ -236,17 +253,27 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 			continue
 		}
 
-		chunkRecords := make([]db.ChunkRecord, n)
+		var chunkRecords []db.ChunkRecord
 		for j, c := range fc.chunks {
-			chunkRecords[j] = db.ChunkRecord{
+			emb := allEmbeddings[embOffset+j]
+			if emb == nil {
+				continue // skip chunks that failed to embed
+			}
+			chunkRecords = append(chunkRecords, db.ChunkRecord{
 				ChunkIndex: j,
 				StartLine:  c.StartLine,
 				EndLine:    c.EndLine,
 				ChunkType:  c.ChunkType,
 				SymbolName: c.SymbolName,
 				Content:    c.Content,
-				Embedding:  allEmbeddings[embOffset+j],
-			}
+				Embedding:  emb,
+			})
+		}
+		if len(chunkRecords) == 0 {
+			tx.Rollback(ctx)
+			dbDuration += time.Since(dbStart)
+			embOffset += n
+			continue
 		}
 
 		if err := db.InsertChunks(ctx, tx, fileID, chunkRecords); err != nil {
