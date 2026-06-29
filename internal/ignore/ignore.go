@@ -54,6 +54,10 @@ var ignoreFiles = map[string]bool{
 
 // BuildIgnoreSpec collects ignore patterns from the directory tree (.gitignore
 // and .codesearchignore) and combines them with the built-in always-ignore list.
+//
+// IMPORTANT: Each .gitignore file's patterns are scoped to the subdirectory the
+// file lives in.  E.g. a pattern "*" inside foo/.gitignore only applies to files
+// under foo/, not the entire repo.  Root-level patterns are applied as-is.
 func BuildIgnoreSpec(directory string) *gitignore.GitIgnore {
 	patterns := make([]string, len(alwaysIgnore))
 	copy(patterns, alwaysIgnore)
@@ -65,8 +69,45 @@ func BuildIgnoreSpec(directory string) *gitignore.GitIgnore {
 		if d.IsDir() && d.Name() == ".git" {
 			return filepath.SkipDir
 		}
-		if ignoreFiles[d.Name()] {
-			patterns = append(patterns, readIgnorePatterns(path)...)
+		if !ignoreFiles[d.Name()] {
+			return nil
+		}
+
+		// Determine the subdirectory scope of this ignore file.
+		scopeDir := filepath.Dir(path)
+		relScope, _ := filepath.Rel(directory, scopeDir)
+
+		raw := readIgnorePatterns(path)
+		for _, p := range raw {
+			if relScope == "." {
+				// Root-level .gitignore: use pattern as-is.
+				patterns = append(patterns, p)
+			} else {
+				// Subdirectory .gitignore: scope the pattern so it only matches
+				// under the directory containing the ignore file, unless the
+				// pattern already contains a slash (Rule 7) which makes it
+				// relative to the ignore file's location.
+				//
+				// For patterns without a slash (Rule 6), Git checks them against
+				// the pathname relative to the .gitignore file location.  We
+				// prepend the relative scope to achieve the same effect.
+				scoped := p
+				if !strings.Contains(p, "/") {
+					scoped = filepath.ToSlash(filepath.Join(relScope, p))
+				} else if strings.HasPrefix(p, "/") {
+					// Leading slash anchors to the ignore file's directory.
+					scoped = filepath.ToSlash(filepath.Join(relScope, p))
+				} else {
+					// Pattern with a slash but no leading slash: relative to
+					// the ignore file's directory.
+					scoped = filepath.ToSlash(filepath.Join(relScope, p))
+				}
+				// Preserve negation prefix.
+				if strings.HasPrefix(p, "!") && !strings.HasPrefix(scoped, "!") {
+					scoped = "!" + scoped
+				}
+				patterns = append(patterns, scoped)
+			}
 		}
 		return nil
 	})
