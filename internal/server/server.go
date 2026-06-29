@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -86,19 +87,22 @@ func Run(cfg config.Config) error {
 	// search_code tool
 	s.AddTool(
 		mcp.NewTool("search_code",
-			mcp.WithDescription("Search indexed code using natural language. Returns the top matching code snippets with file path, line range, and relevance score."),
+			mcp.WithDescription("Search indexed code using natural language. Location-first: returns the top matches as file path, line range, symbol, type, score, and a compact snippet preview (~3 lines / 160 chars) — use these to Read the exact lines. Set verbose=true for the full 500-char snippet."),
 			mcp.WithString("query",
 				mcp.Required(),
 				mcp.Description("Natural language description of the code you're looking for."),
 			),
 			mcp.WithNumber("limit",
-				mcp.Description("Maximum number of results to return (default 10)."),
+				mcp.Description("Maximum number of results to return (default 6)."),
 			),
 			mcp.WithString("codebase",
 				mcp.Description("Absolute path of a specific indexed codebase to search (SQLite backend). Defaults to the most recently indexed codebase."),
 			),
 			mcp.WithBoolean("all",
 				mcp.Description("Search across every indexed codebase and merge results (SQLite backend)."),
+			),
+			mcp.WithBoolean("verbose",
+				mcp.Description("When true, return the full 500-char snippet per result instead of the compact ~3-line/160-char preview. Default false."),
 			),
 		),
 		func(toolCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -107,12 +111,13 @@ func Run(cfg config.Config) error {
 			if query == "" {
 				return mcp.NewToolResultError("query parameter is required"), nil
 			}
-			limit := 10
+			limit := 6
 			if l, ok := args["limit"].(float64); ok && l > 0 {
 				limit = int(l)
 			}
 			codebase, _ := args["codebase"].(string)
 			all, _ := args["all"].(bool)
+			verbose, _ := args["verbose"].(bool)
 
 			queryEmbedding, err := embedder.EmbedSingle(query)
 			if err != nil {
@@ -126,9 +131,14 @@ func Run(cfg config.Config) error {
 
 			out := make([]map[string]any, len(results))
 			for i, r := range results {
-				snippet := r.Snippet
-				if len(snippet) > 500 {
-					snippet = snippet[:500]
+				var snippet string
+				if verbose {
+					snippet = r.Snippet
+					if len(snippet) > 500 {
+						snippet = snippet[:500]
+					}
+				} else {
+					snippet = trimSnippet(r.Snippet, 3, 160)
 				}
 				out[i] = map[string]any{
 					"file":    r.FilePath,
@@ -160,6 +170,55 @@ func Run(cfg config.Config) error {
 	)
 
 	return server.ServeStdio(s)
+}
+
+// trimSnippet returns a compact preview of s: at most maxLines lines and maxChars
+// chars (whichever comes first), with common leading indentation stripped so the
+// preview reads flush-left. A trailing ellipsis marks content that was cut.
+func trimSnippet(s string, maxLines, maxChars int) string {
+	lines := strings.Split(s, "\n")
+	truncated := false
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		truncated = true
+	}
+
+	// Compute the minimum leading whitespace across non-blank kept lines.
+	minIndent := -1
+	for _, ln := range lines {
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		indent := len(ln) - len(strings.TrimLeft(ln, " \t"))
+		if minIndent == -1 || indent < minIndent {
+			minIndent = indent
+		}
+	}
+	if minIndent > 0 {
+		for i, ln := range lines {
+			if len(ln) >= minIndent {
+				lines[i] = ln[minIndent:]
+			} else {
+				lines[i] = strings.TrimLeft(ln, " \t")
+			}
+		}
+	}
+
+	out := strings.Join(lines, "\n")
+
+	// Cap to maxChars, counting runes so we never split a multi-byte char.
+	if maxChars > 0 {
+		runes := []rune(out)
+		if len(runes) > maxChars {
+			out = string(runes[:maxChars])
+			truncated = true
+		}
+	}
+
+	if truncated {
+		out += "…"
+	}
+	return out
 }
 
 // search runs a vector search against one codebase (default/selected) or, when all
