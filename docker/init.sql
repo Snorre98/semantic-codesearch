@@ -42,3 +42,17 @@ CREATE TABLE IF NOT EXISTS index_runs (
     errors          INTEGER DEFAULT 0,
     error_details   JSONB DEFAULT '[]'::jsonb
 );
+
+-- Per-codebase metadata mirroring the SQLite registry, so the management CLI has
+-- parity across backends (list/info/remove/prune, model-mismatch detection).
+CREATE TABLE IF NOT EXISTS codebases (
+    root              TEXT PRIMARY KEY,
+    model             TEXT NOT NULL,
+    dims              INTEGER NOT NULL,
+    files             INTEGER NOT NULL DEFAULT 0,
+    chunks            INTEGER NOT NULL DEFAULT 0,
+    last_indexed      TIMESTAMPTZ,
+    status            TEXT NOT NULL DEFAULT 'active',
+    deprecated_at     TIMESTAMPTZ,
+    deprecated_reason TEXT
+);

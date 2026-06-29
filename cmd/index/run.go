@@ -23,6 +23,13 @@ func Run(directory string) error {
 	}
 	defer st.Close()
 
+	// Refuse to mix vector spaces: if this codebase was embedded with a different
+	// model/dimension, indexing into it would corrupt search. The CLI's
+	// `rebuild --reembed` path archives the old DB and skips this guard.
+	if err := store.GuardModel(ctx, cfg, st, directory); err != nil {
+		return err
+	}
+
 	embedder := embeddings.NewClient(cfg)
 
 	onProgress := func(msg string) {
@@ -34,12 +41,10 @@ func Run(directory string) error {
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
-	// Record this codebase in the registry (SQLite backend).
-	if cfg.Backend == "" || cfg.Backend == "sqlite" {
-		if reg, rerr := store.LoadRegistry(cfg); rerr == nil {
-			if s, serr := st.Status(ctx); serr == nil {
-				reg.Upsert(directory, cfg.EmbeddingModel, config.EmbeddingDimensions, s.TotalFiles, s.TotalChunks, time.Now())
-			}
+	// Record this codebase's metadata (registry for SQLite, codebases table for PG).
+	if s, serr := st.Status(ctx); serr == nil {
+		if rerr := store.RecordCodebase(ctx, cfg, st, directory, s.TotalFiles, s.TotalChunks, time.Now()); rerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not record codebase metadata: %v\n", rerr)
 		}
 	}
 
