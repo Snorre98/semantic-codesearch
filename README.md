@@ -27,10 +27,16 @@ git clone <this-repo>
 cd semantic-codesearch
 go build -o mcp-code-search .
 
-claude mcp add code-search -- /full/path/to/mcp-code-search serve
+# Print the exact registration command + .mcp.json snippet for this binary:
+./mcp-code-search mcp
+# ...or register it directly:
+./mcp-code-search mcp install
 ```
 
 That's it. The server creates `~/.codesearch/` on first index. No containers or ports.
+
+Run `./mcp-code-search doctor` to verify Ollama is reachable, the model is pulled, and its
+output dimension matches the schema before you start indexing.
 
 ## Tools
 
@@ -64,7 +70,60 @@ Each codebase is isolated in its own DB file, tracked in `~/.codesearch/registry
 > search_code("retry logic", all=true)                  # both, merged by score
 ```
 
-To forget a codebase, delete its row from `registry.json` and `rm` its `.db` file.
+To forget a codebase, use `mcp-code-search remove <root>` (see the CLI reference below) — do
+not hand-edit `registry.json`.
+
+## Command reference (CLI)
+
+The same binary is both the MCP server and a management CLI. Run `mcp-code-search help` for
+the full list. Commands take `--json` where machine-readable output is useful, and prompt
+before destructive actions (`--force` to skip).
+
+| Command | What it does |
+|---|---|
+| `serve` | Run the MCP stdio server (default when no command). |
+| `index <dir> [--reembed]` | Index a codebase. Refuses if it was indexed with a different model unless `--reembed`. |
+| `list [--all] [--json]` | List indexed codebases (root, size on disk, files/chunks, model, **matches?**, last indexed, status). `--all` includes deprecated. |
+| `info <root> [--json]` | Detailed stats for one codebase. |
+| `remove <root> [--force]` | Deprecate a codebase (alias `forget`). **Keeps the data**; reclaim it later with `prune --purge`. |
+| `rebuild <root> [--reembed] [--force]` | Re-index. Plain = drop + full re-index in place; `--reembed` archives the old index and re-embeds with the current model. |
+| `prune [--purge] [--force] [--json]` | Deprecate stale codebases (missing root or DB). `--purge` permanently deletes all deprecated data. |
+| `doctor [--json]` | Health check: Ollama reachable, model pulled, output dimension == 768, registry health. Alias `check`. |
+| `pull <model>` | Pull an embedding model into Ollama and verify its dimension. |
+| `mcp [--docker]` / `mcp install [--docker]` | Print (or run) the `claude mcp add` command + `.mcp.json` snippet, for native or Docker/Postgres mode. |
+
+### Managing & deprecating codebases
+
+Codebases move through a simple lifecycle so embeddings are never silently destroyed:
+
+```
+active ──remove / model switch / prune──► deprecated ──prune --purge──► gone
+```
+
+- **active** — searchable, listed by default.
+- **deprecated** — excluded from search and from `list` (use `list --all` to see them). The
+  data is retained: for SQLite the `.db` is **archived** (renamed to
+  `<name>-deprecated-<model>-<ts>.db`), for Postgres the rows are flagged.
+- **purge** — `prune --purge` deletes deprecated data for good.
+
+### Switching embedding models
+
+A codebase embedded with model A **cannot** be searched with model B — the vectors live in a
+different space. The registry records each codebase's model and dimension, and the tool
+refuses to mix them:
+
+```bash
+# After changing MCP_CS_EMBED_MODEL, a plain re-index is refused:
+mcp-code-search index /path/to/repo
+#   error: codebase "…" indexed with model "nomic-embed-text" but configured model is
+#   "embeddinggemma"; re-embed with `rebuild --reembed` to switch models
+
+# Opt in explicitly — the old index is archived as deprecated, then re-embedded:
+mcp-code-search rebuild /path/to/repo --reembed
+```
+
+`serve` applies the same rule: searches skip (or refuse) codebases whose model no longer
+matches the configured one.
 
 ## Configuration
 
@@ -134,6 +193,11 @@ MCP_CS_BACKEND=postgres go run . index /path/to/codebase
 ```
 
 In this mode all codebases share one database (path-namespaced) and `MCP_CS_SQLITE_DIR`/`codebase`/`all` are ignored. The Docker registration commands and GPU notes from prior versions still apply; the container passes `MCP_CS_PG_HOST=postgres`/`MCP_CS_PG_PORT=5432`. Reset with `docker compose --profile ollama down -v`.
+
+The management CLI (`list`/`info`/`remove`/`rebuild`/`prune`) works here too: per-codebase
+metadata lives in a `codebases` table (created automatically on connect, also in
+`docker/init.sql`). Deprecation flags rows and excludes them from search until `prune --purge`
+deletes them. Generate the registration with `mcp-code-search mcp --docker`.
 
 ## Development
 

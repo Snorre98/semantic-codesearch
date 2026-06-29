@@ -55,6 +55,10 @@ func Run(cfg config.Config) error {
 			}
 			defer st.Close()
 
+			if err := store.GuardModel(toolCtx, cfg, st, directory); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
+			}
+
 			onProgress := func(msg string) {
 				notification := mcp.NewLoggingMessageNotification(mcp.LoggingLevelInfo, "indexer", msg)
 				s.SendLogMessageToClient(toolCtx, notification)
@@ -65,13 +69,9 @@ func Run(cfg config.Config) error {
 				return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
 			}
 
-			// Record this codebase in the registry so search/all can find it.
-			if sqliteBackend(cfg) {
-				if reg, rerr := store.LoadRegistry(cfg); rerr == nil {
-					if status, serr := st.Status(toolCtx); serr == nil {
-						reg.Upsert(directory, cfg.EmbeddingModel, config.EmbeddingDimensions, status.TotalFiles, status.TotalChunks, time.Now())
-					}
-				}
+			// Record this codebase's metadata so search/all can find it.
+			if status, serr := st.Status(toolCtx); serr == nil {
+				store.RecordCodebase(toolCtx, cfg, st, directory, status.TotalFiles, status.TotalChunks, time.Now())
 			}
 
 			msg := fmt.Sprintf("Indexed %d files (%d unchanged, %d errors), %d chunks, %d batches in %.1fs | walk=%.1fs chunk=%.1fs embed=%.1fs db=%.1fs | model=%s batch=%d",
@@ -179,16 +179,28 @@ func search(ctx context.Context, cfg config.Config, embedding []float32, limit i
 		return nil, err
 	}
 
+	// Only search codebases embedded with the currently configured model — mixing
+	// vector spaces returns garbage. reg.List() already excludes deprecated ones.
 	var roots []string
 	switch {
 	case all:
 		for _, e := range reg.List() {
-			roots = append(roots, e.Root)
+			if ok, _ := store.MatchesConfig(e, cfg); ok {
+				roots = append(roots, e.Root)
+			}
+		}
+		if len(roots) == 0 {
+			return nil, fmt.Errorf("no indexed codebase matches the configured model %q; re-embed with `rebuild --reembed`", cfg.EmbeddingModel)
 		}
 	case codebase != "":
+		if e, ok := reg.Get(codebase); ok {
+			if ok, reason := store.MatchesConfig(e, cfg); !ok {
+				return nil, fmt.Errorf("codebase %q %s; re-embed with `rebuild --reembed`", e.Root, reason)
+			}
+		}
 		roots = []string{codebase}
 	default:
-		if e, ok := mostRecent(reg); ok {
+		if e, ok := mostRecentMatching(reg, cfg); ok {
 			roots = []string{e.Root}
 		}
 	}
@@ -269,11 +281,15 @@ func statusMap(s models.IndexStatus) map[string]any {
 	}
 }
 
-func mostRecent(reg *store.Registry) (store.RegistryEntry, bool) {
+// mostRecentMatching returns the most recently indexed active codebase whose
+// embedding model matches the current config, skipping mismatched ones.
+func mostRecentMatching(reg *store.Registry, cfg config.Config) (store.RegistryEntry, bool) {
 	entries := reg.List()
-	if len(entries) == 0 {
-		return store.RegistryEntry{}, false
-	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].LastIndexed > entries[j].LastIndexed })
-	return entries[0], true
+	for _, e := range entries {
+		if ok, _ := store.MatchesConfig(e, cfg); ok {
+			return e, true
+		}
+	}
+	return store.RegistryEntry{}, false
 }

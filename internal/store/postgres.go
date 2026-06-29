@@ -39,6 +39,11 @@ func OpenPostgres(ctx context.Context, cfg config.Config) (Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
+	// Ensure the codebase-metadata table exists (parity with the SQLite registry).
+	if _, err := pool.Exec(ctx, pgCodebasesSchema); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("create codebases table: %w", err)
+	}
 	return &postgresStore{pool: pool}, nil
 }
 
@@ -153,6 +158,11 @@ func (s *postgresStore) Search(ctx context.Context, embedding []float32, limit i
 			1 - (c.embedding <=> $1) AS score
 		FROM code_chunks c
 		JOIN indexed_files f ON f.id = c.file_id
+		WHERE NOT EXISTS (
+			SELECT 1 FROM codebases cb
+			WHERE cb.status = 'deprecated'
+			  AND (f.file_path = cb.root OR f.file_path LIKE cb.root || '/%')
+		)
 		ORDER BY c.embedding <=> $1
 		LIMIT $2`,
 		vec, limit,
