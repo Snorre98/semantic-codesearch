@@ -46,6 +46,23 @@ Index a codebase for semantic search. Walks the directory, respects `.gitignore`
 
 Supports **incremental re-indexing** — unchanged files (by mtime) are skipped automatically.
 
+#### Excluding files from search (`.codesearchignore`)
+
+Indexing respects `.gitignore`, skips binary/oversized files, and also honors an optional
+**`.codesearchignore`** file (gitignore syntax) at the repo root or any subdirectory. Use it
+to keep noisy or stale content out of semantic search without touching Git — for example, to
+exclude markdown docs:
+
+```gitignore
+# .codesearchignore
+*.md            # skip all markdown
+!ARCHITECTURE.md   # ...but keep this one
+docs/legacy/    # skip a whole stale directory
+```
+
+Rules apply to **future** indexing. To drop chunks for files an updated rule now excludes,
+re-index: `mcp-code-search rebuild <root>`.
+
 ### `search_code(query, limit=10, codebase?, all?)`
 
 Natural language search over indexed code. Returns top matches with file path, line range, relevance score, and code snippet.
