@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"semantic-codesearch/internal/config"
-	"semantic-codesearch/internal/db"
 	"semantic-codesearch/internal/embeddings"
 	"semantic-codesearch/internal/indexer"
+	"semantic-codesearch/internal/store"
 )
 
 // Run indexes the given directory and prints a summary to stderr.
@@ -16,11 +17,11 @@ func Run(directory string) error {
 	ctx := context.Background()
 	cfg := config.Load()
 
-	pool, err := db.NewPool(ctx, cfg)
+	st, err := store.Open(ctx, cfg, directory)
 	if err != nil {
-		return fmt.Errorf("db pool: %w", err)
+		return fmt.Errorf("open store: %w", err)
 	}
-	defer pool.Close()
+	defer st.Close()
 
 	embedder := embeddings.NewClient(cfg)
 
@@ -28,9 +29,18 @@ func Run(directory string) error {
 		fmt.Fprintf(os.Stderr, "%s\n", msg)
 	}
 
-	result, err := indexer.IndexDirectory(ctx, directory, cfg, pool, embedder, onProgress)
+	result, err := indexer.IndexDirectory(ctx, directory, cfg, st, embedder, onProgress)
 	if err != nil {
 		return fmt.Errorf("indexing failed: %w", err)
+	}
+
+	// Record this codebase in the registry (SQLite backend).
+	if cfg.Backend == "" || cfg.Backend == "sqlite" {
+		if reg, rerr := store.LoadRegistry(cfg); rerr == nil {
+			if s, serr := st.Status(ctx); serr == nil {
+				reg.Upsert(directory, cfg.EmbeddingModel, config.EmbeddingDimensions, s.TotalFiles, s.TotalChunks, time.Now())
+			}
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "Indexed %d files (%d unchanged, %d errors) in %.1fs\n",

@@ -10,16 +10,17 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/errgroup"
 
 	"semantic-codesearch/internal/chunker"
 	"semantic-codesearch/internal/config"
-	"semantic-codesearch/internal/db"
 	"semantic-codesearch/internal/embeddings"
 	"semantic-codesearch/internal/ignore"
 	"semantic-codesearch/internal/models"
+	"semantic-codesearch/internal/store"
 )
 
 // ProgressFunc is a callback for reporting indexing progress.
@@ -39,8 +40,8 @@ type pendingFile struct {
 	fileHash   string
 	lang       string
 	chunks     []models.CodeChunk
-	texts      []string      // formatted embedding texts, parallel to chunks
-	embeddings [][]float32   // filled after embed; nil entries = failed
+	texts      []string    // formatted embedding texts, parallel to chunks
+	embeddings [][]float32 // filled after embed; nil entries = failed
 }
 
 // textRef maps a text index in the flush buffer back to its owning file and chunk.
@@ -97,8 +98,8 @@ type benchmarkEntry struct {
 	Arch      string  `json:"arch"`
 }
 
-// IndexDirectory walks a directory, chunks files, embeds them, and stores in pgvector.
-func IndexDirectory(ctx context.Context, directory string, cfg config.Config, pool *pgxpool.Pool, embedder *embeddings.Client, onProgress ProgressFunc) (models.IndexResult, error) {
+// IndexDirectory walks a directory, chunks files, embeds them, and writes to the Store.
+func IndexDirectory(ctx context.Context, directory string, cfg config.Config, st store.Store, embedder *embeddings.Client, onProgress ProgressFunc) (models.IndexResult, error) {
 	if onProgress == nil {
 		onProgress = func(string) {}
 	}
@@ -154,7 +155,7 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 		mtime := float64(finfo.ModTime().Unix())
 
 		// Incremental: skip unchanged files
-		if _, unchanged := db.GetFileIfUnchanged(ctx, pool, path, mtime); unchanged {
+		if st.FileUnchanged(ctx, path, mtime) {
 			filesSkipped++
 			return nil
 		}
@@ -225,7 +226,7 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 
 		// Flush when buffer is full or on the last candidate
 		if len(buf.texts) >= cfg.BatchSize || i == len(candidates)-1 {
-			if err := flushAndStore(&buf, ctx, pool, embedder, cfg, onProgress, m); err != nil {
+			if err := flushAndStore(&buf, ctx, st, embedder, cfg, onProgress, m); err != nil {
 				break // context cancelled
 			}
 			onProgress(fmt.Sprintf("Progress: %d/%d files indexed, %d chunks, %d errors",
@@ -253,7 +254,7 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 		elapsed, walkS, chunkS, embedS, dbS, cfg.EmbeddingModel, cfg.BatchSize)
 
 	// Record the run
-	db.RecordIndexRun(ctx, pool, root, m.filesProcessed, filesSkipped, m.errors, m.errorDetails)
+	st.RecordIndexRun(ctx, root, m.filesProcessed, filesSkipped, m.errors, m.errorDetails)
 
 	return models.IndexResult{
 		FilesProcessed: m.filesProcessed,
@@ -272,47 +273,82 @@ func IndexDirectory(ctx context.Context, directory string, cfg config.Config, po
 	}, nil
 }
 
-// flushAndStore embeds all buffered texts and writes the buffered files to the database.
-// Returns a non-nil error only on context cancellation.
-func flushAndStore(buf *flushBuffer, ctx context.Context, pool *pgxpool.Pool, embedder *embeddings.Client, cfg config.Config, onProgress ProgressFunc, m *indexMetrics) error {
+// flushAndStore embeds all buffered texts (sub-batches in parallel) and writes the
+// buffered files to the store. Returns a non-nil error only on context cancellation.
+func flushAndStore(buf *flushBuffer, ctx context.Context, st store.Store, embedder *embeddings.Client, cfg config.Config, onProgress ProgressFunc, m *indexMetrics) error {
 	if len(buf.texts) == 0 {
 		return nil
 	}
 
-	// Embed in sub-batches of cfg.BatchSize
-	allEmbeddings := make([][]float32, len(buf.texts))
-	embedStart := time.Now()
+	// Split the buffer into sub-batches of cfg.BatchSize.
+	type batchRange struct{ start, end int }
+	var ranges []batchRange
 	for i := 0; i < len(buf.texts); i += cfg.BatchSize {
 		end := i + cfg.BatchSize
 		if end > len(buf.texts) {
 			end = len(buf.texts)
 		}
-		m.totalBatches++
-		onProgress(fmt.Sprintf("Embedding batch %d (%d chunks)...", m.totalBatches, end-i))
-
-		batch, err := embedder.EmbedBatch(buf.texts[i:end])
-		if err != nil {
-			log.Printf("[index] batch %d failed (%v), retrying individually", m.totalBatches, err)
-			for j := i; j < end; j++ {
-				single, err2 := embedder.EmbedBatch(buf.texts[j : j+1])
-				if err2 != nil {
-					m.errors++
-					ref := buf.textMap[j]
-					m.errorDetails = append(m.errorDetails, models.ErrorDetail{
-						File:  buf.files[ref.fileIdx].relPath,
-						Error: fmt.Sprintf("chunk embed failed: %v", err2),
-					})
-					continue
-				}
-				allEmbeddings[j] = single[0]
-			}
-			continue
-		}
-		copy(allEmbeddings[i:end], batch)
+		ranges = append(ranges, batchRange{i, end})
 	}
-	m.embedDuration += time.Since(embedStart)
+	m.totalBatches += len(ranges)
 
-	// Distribute embeddings back to their owning files
+	concurrency := cfg.EmbedConcurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+
+	allEmbeddings := make([][]float32, len(buf.texts))
+	embedStart := time.Now()
+
+	// Embed sub-batches concurrently; mu guards the shared error metrics.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(concurrency)
+	var mu sync.Mutex
+	var done int
+
+	for _, r := range ranges {
+		r := r
+		g.Go(func() error {
+			if gctx.Err() != nil {
+				return gctx.Err()
+			}
+			mu.Lock()
+			done++
+			n := done
+			mu.Unlock()
+			onProgress(fmt.Sprintf("Embedding batch %d/%d (%d chunks)...", n, len(ranges), r.end-r.start))
+
+			batch, err := embedder.EmbedBatch(buf.texts[r.start:r.end])
+			if err != nil {
+				log.Printf("[index] batch %d failed (%v), retrying individually", n, err)
+				for j := r.start; j < r.end; j++ {
+					single, err2 := embedder.EmbedBatch(buf.texts[j : j+1])
+					if err2 != nil {
+						ref := buf.textMap[j]
+						mu.Lock()
+						m.errors++
+						m.errorDetails = append(m.errorDetails, models.ErrorDetail{
+							File:  buf.files[ref.fileIdx].relPath,
+							Error: fmt.Sprintf("chunk embed failed: %v", err2),
+						})
+						mu.Unlock()
+						continue
+					}
+					allEmbeddings[j] = single[0]
+				}
+				return nil
+			}
+			copy(allEmbeddings[r.start:r.end], batch)
+			return nil
+		})
+	}
+	err := g.Wait()
+	m.embedDuration += time.Since(embedStart)
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	// Distribute embeddings back to their owning files.
 	for i, emb := range allEmbeddings {
 		ref := buf.textMap[i]
 		pf := &buf.files[ref.fileIdx]
@@ -322,38 +358,17 @@ func flushAndStore(buf *flushBuffer, ctx context.Context, pool *pgxpool.Pool, em
 		pf.embeddings[ref.chunkIdx] = emb
 	}
 
-	// Write each file to the database in its own transaction
+	// Build store records (chunks with a nil embedding are skipped by the store).
+	fileRecords := make([]store.FileWithChunks, 0, len(buf.files))
 	for fi := range buf.files {
 		pf := &buf.files[fi]
-
-		dbStart := time.Now()
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			m.dbDuration += time.Since(dbStart)
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			m.errors++
-			m.errorDetails = append(m.errorDetails, models.ErrorDetail{File: pf.path, Error: err.Error()})
-			continue
-		}
-
-		fileID, err := db.UpsertFile(ctx, tx, pf.path, pf.mtime, pf.fileHash, pf.lang)
-		if err != nil {
-			tx.Rollback(ctx)
-			m.dbDuration += time.Since(dbStart)
-			m.errors++
-			m.errorDetails = append(m.errorDetails, models.ErrorDetail{File: pf.path, Error: err.Error()})
-			continue
-		}
-
-		var chunkRecords []db.ChunkRecord
+		chunks := make([]store.ChunkRecord, 0, len(pf.chunks))
 		for j, c := range pf.chunks {
-			emb := pf.embeddings[j]
-			if emb == nil {
-				continue
+			var emb []float32
+			if pf.embeddings != nil {
+				emb = pf.embeddings[j]
 			}
-			chunkRecords = append(chunkRecords, db.ChunkRecord{
+			chunks = append(chunks, store.ChunkRecord{
 				ChunkIndex: j,
 				StartLine:  c.StartLine,
 				EndLine:    c.EndLine,
@@ -363,31 +378,23 @@ func flushAndStore(buf *flushBuffer, ctx context.Context, pool *pgxpool.Pool, em
 				Embedding:  emb,
 			})
 		}
-		if len(chunkRecords) == 0 {
-			tx.Rollback(ctx)
-			m.dbDuration += time.Since(dbStart)
-			continue
-		}
-
-		if err := db.InsertChunks(ctx, tx, fileID, chunkRecords); err != nil {
-			tx.Rollback(ctx)
-			m.dbDuration += time.Since(dbStart)
-			m.errors++
-			m.errorDetails = append(m.errorDetails, models.ErrorDetail{File: pf.path, Error: err.Error()})
-			continue
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			m.dbDuration += time.Since(dbStart)
-			m.errors++
-			m.errorDetails = append(m.errorDetails, models.ErrorDetail{File: pf.path, Error: err.Error()})
-			continue
-		}
-		m.dbDuration += time.Since(dbStart)
-
-		m.filesProcessed++
-		m.totalChunks += len(pf.chunks)
+		fileRecords = append(fileRecords, store.FileWithChunks{
+			Path:         pf.path,
+			LastModified: pf.mtime,
+			FileHash:     pf.fileHash,
+			Language:     pf.lang,
+			Chunks:       chunks,
+		})
 	}
+
+	dbStart := time.Now()
+	storedFiles, storedChunks, errs := st.StoreFiles(ctx, fileRecords)
+	m.dbDuration += time.Since(dbStart)
+
+	m.filesProcessed += storedFiles
+	m.totalChunks += storedChunks
+	m.errors += len(errs)
+	m.errorDetails = append(m.errorDetails, errs...)
 
 	return nil
 }

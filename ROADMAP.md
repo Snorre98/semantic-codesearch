@@ -73,7 +73,17 @@ We're already using one of the longest context windows available. Switching mode
 
 ~36% faster overall. Batches dropped from 2,256 to 40 — HTTP overhead eliminated. Embed time is still 98% of total — pure model inference, only reducible by faster GPU, smaller model, or concurrent batch requests.
 
-## SQLite as Default Storage
+## SQLite as Default Storage — ✅ Done
+
+**Shipped.** SQLite + `sqlite-vec` is now the default backend (`MCP_CS_BACKEND=sqlite`). What was built, vs. the original sketch below:
+
+- Storage is abstracted behind a `Store` interface in `internal/store/` with SQLite and Postgres implementations; the factory `store.Open(cfg, root)` selects by config. Postgres is retained as a selectable backend.
+- **Pure-Go** driver: `modernc.org/sqlite` + `modernc.org/sqlite/vec` (sqlite-vec transpiled in-module) — no CGo, no external extension file. (The binary still needs CGo overall for tree-sitter.)
+- **One DB file per codebase** in a central dir (`~/.codesearch/<name>-<hash>.db`), tracked by `registry.json` — chosen over the in-repo `.codesearch/index.db` idea for cleaner lifecycle and cross-codebase search. `search_code` gained `codebase` and `all` parameters.
+- vec0 KNN (cosine), score = `1 - distance` to match the prior pgvector semantics. Writes batched one transaction per flush under WAL — DB time dropped to ~0s.
+- Embedding sub-batches are now embedded **concurrently** (`MCP_CS_EMBED_CONCURRENCY`, default 4), attacking the ~98%-of-total embed bottleneck noted above.
+
+Original rationale and sketch (kept for context):
 
 Postgres+pgvector is overkill for a single-user tool on one machine. Replace with SQLite as the default storage backend — zero setup, no server process, the index is just a file.
 
