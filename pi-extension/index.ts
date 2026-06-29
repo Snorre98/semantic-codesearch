@@ -116,11 +116,15 @@ class MCPClient {
     this.pending.clear();
   }
 
-  async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  async call(method: string, params: Record<string, unknown> = {}, timeoutMs = 30000): Promise<unknown> {
     if (this._closed) throw new Error("MCP server closed");
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`MCP call "${method}" timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve: (v) => { clearTimeout(timer); resolve(v); }, reject: (e) => { clearTimeout(timer); reject(e); } });
       this.proc?.stdin?.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     });
   }
@@ -214,8 +218,13 @@ export default async function (pi: ExtensionAPI) {
       ],
       parameters,
       async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-        const result = await mcp.call(t.name, params as Record<string, unknown>);
-        const text = JSON.stringify(result, null, 2);
+        const result = await mcp.call("tools/call", {
+          name: t.name,
+          arguments: params as Record<string, unknown>,
+        });
+        // MCP tools/call returns { content, isError } — extract content
+        const mcpResult = result as { content?: Array<{ type: string; text: string }>; isError?: boolean };
+        const text = mcpResult?.content?.[0]?.text ?? JSON.stringify(result, null, 2);
         return {
           content: [{ type: "text", text }],
           details: { raw: result },
