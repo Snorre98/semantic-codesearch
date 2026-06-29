@@ -1,0 +1,12 @@
+{
+  "name": "codesearch-pi",
+  "version": "1.0.0",
+  "description": "Pi extension for semantic code search via mcp-code-search",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.0",
+    "typebox": "^1.1.0"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
