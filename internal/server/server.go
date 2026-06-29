@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -31,7 +33,7 @@ func Run(cfg config.Config) error {
 	s := server.NewMCPServer(
 		"Code Search",
 		"1.0.0",
-		server.WithInstructions("Use index_codebase to index a project before searching. Use search_code for natural language queries over indexed code. Multiple codebases are supported; pass `codebase` to target one or `all=true` to search every indexed codebase."),
+		server.WithInstructions("Use index_codebase to index a project before searching. Use search_code for natural language queries over indexed code. Multiple codebases are supported; pass `codebase` to target one or `all=true` to search every indexed codebase. Use save_search_markdown to run a search and write the full results to a .md file — a reusable cross-session memory doc; its `output_path` must be inside the caller's own project, since the server's working directory differs."),
 	)
 
 	// index_codebase tool
@@ -154,6 +156,93 @@ func Run(cfg config.Config) error {
 		},
 	)
 
+	// save_search_markdown tool
+	s.AddTool(
+		mcp.NewTool("save_search_markdown",
+			mcp.WithDescription("Run a semantic search and write the full results to a markdown (.md) file, producing a reusable cross-session memory doc without hand-writing it. Returns the absolute path written and the result count."),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("Natural language description of the code you're looking for."),
+			),
+			mcp.WithString("output_path",
+				mcp.Required(),
+				mcp.Description("Absolute path to the .md file to write, OR a directory (a filename is derived from the query slug if a directory or non-.md path is given). Must be inside the caller's own project directory, since the server's working directory differs."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum number of results to include (default 10 — a saved doc wants more coverage than interactive search)."),
+			),
+			mcp.WithString("codebase",
+				mcp.Description("Absolute path of a specific indexed codebase to search (SQLite backend). Defaults to the most recently indexed codebase."),
+			),
+			mcp.WithBoolean("all",
+				mcp.Description("Search across every indexed codebase and merge results (SQLite backend)."),
+			),
+			mcp.WithString("title",
+				mcp.Description("H1 title for the generated doc. Defaults to the query."),
+			),
+			mcp.WithString("notes",
+				mcp.Description("Optional free-text summary, rendered as a Summary section above the raw results."),
+			),
+		),
+		func(toolCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			query, _ := args["query"].(string)
+			if query == "" {
+				return mcp.NewToolResultError("query parameter is required"), nil
+			}
+			outputPath, _ := args["output_path"].(string)
+			if outputPath == "" {
+				return mcp.NewToolResultError("output_path parameter is required"), nil
+			}
+			limit := 10
+			if l, ok := args["limit"].(float64); ok && l > 0 {
+				limit = int(l)
+			}
+			codebase, _ := args["codebase"].(string)
+			all, _ := args["all"].(bool)
+			title, _ := args["title"].(string)
+			notes, _ := args["notes"].(string)
+
+			queryEmbedding, err := embedder.EmbedSingle(query)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
+			}
+
+			results, err := search(toolCtx, cfg, queryEmbedding, limit, codebase, all)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
+			}
+
+			var roots string
+			switch {
+			case all:
+				roots = "all indexed codebases"
+			case codebase != "":
+				roots = codebase
+			default:
+				roots = "(most recently indexed)"
+			}
+			meta := markdownMeta{
+				Query:     query,
+				Roots:     roots,
+				Model:     cfg.EmbeddingModel,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Count:     len(results),
+			}
+
+			md := renderSearchMarkdown(meta, title, notes, results)
+			path := resolveMarkdownPath(outputPath, query)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Error creating directory: %v", err)), nil
+			}
+			if err := os.WriteFile(path, []byte(md), 0o644); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Error writing file: %v", err)), nil
+			}
+
+			return mcp.NewToolResultText(fmt.Sprintf("Wrote %d result(s) to %s", len(results), path)), nil
+		},
+	)
+
 	// index_status tool
 	s.AddTool(
 		mcp.NewTool("index_status",
@@ -219,6 +308,119 @@ func trimSnippet(s string, maxLines, maxChars int) string {
 		out += "…"
 	}
 	return out
+}
+
+// markdownMeta holds the non-deterministic header fields for a saved search doc,
+// supplied by the handler so renderSearchMarkdown stays pure and testable.
+type markdownMeta struct {
+	Query     string
+	Roots     string
+	Model     string
+	Timestamp string
+	Count     int
+}
+
+// renderSearchMarkdown builds a full markdown report for a saved search: an H1
+// title, a metadata block, an optional Summary from notes, and one subsection per
+// hit with the full (untrimmed) snippet in a fenced code block.
+func renderSearchMarkdown(meta markdownMeta, title, notes string, results []models.SearchResult) string {
+	if title == "" {
+		title = meta.Query
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s\n\n", title)
+
+	b.WriteString("- **Query:** " + meta.Query + "\n")
+	b.WriteString("- **Codebase root(s):** " + meta.Roots + "\n")
+	fmt.Fprintf(&b, "- **Results:** %d\n", meta.Count)
+	b.WriteString("- **Model:** " + meta.Model + "\n")
+	b.WriteString("- **Generated:** " + meta.Timestamp + "\n")
+
+	if strings.TrimSpace(notes) != "" {
+		b.WriteString("\n## Summary\n\n")
+		b.WriteString(strings.TrimRight(notes, "\n") + "\n")
+	}
+
+	b.WriteString("\n## Results\n")
+	if len(results) == 0 {
+		b.WriteString("\nNo matches found.\n")
+		return b.String()
+	}
+
+	for _, r := range results {
+		fmt.Fprintf(&b, "\n### [%s:%d-%d](%s#L%d-L%d)\n\n",
+			r.FilePath, r.StartLine, r.EndLine, r.FilePath, r.StartLine, r.EndLine)
+		symbol := r.SymbolName
+		if symbol == "" {
+			symbol = "—"
+		}
+		fmt.Fprintf(&b, "Score: %.4f · Symbol: %s · Type: %s\n\n", r.Score, symbol, r.ChunkType)
+		fmt.Fprintf(&b, "```%s\n%s\n```\n", markdownFence(r.FilePath), strings.TrimRight(r.Snippet, "\n"))
+	}
+	return b.String()
+}
+
+// markdownFence maps a file path to a code-fence language hint from its extension.
+func markdownFence(path string) string {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(path), ".")) {
+	case "go":
+		return "go"
+	case "py":
+		return "python"
+	case "js", "jsx":
+		return "javascript"
+	case "ts", "tsx":
+		return "typescript"
+	case "rs":
+		return "rust"
+	case "java":
+		return "java"
+	case "rb":
+		return "ruby"
+	case "c", "h":
+		return "c"
+	case "cpp", "cc", "cxx", "hpp":
+		return "cpp"
+	case "sh", "bash":
+		return "bash"
+	default:
+		return ""
+	}
+}
+
+// resolveMarkdownPath returns the .md file path to write. If outputPath already
+// ends in .md it is used as-is; otherwise it is treated as a directory and a
+// filename is derived from a slug of the query.
+func resolveMarkdownPath(outputPath, query string) string {
+	if strings.HasSuffix(strings.ToLower(outputPath), ".md") {
+		return outputPath
+	}
+	return filepath.Join(outputPath, slugify(query)+".md")
+}
+
+// slugify converts s to a filesystem-friendly slug: lowercase, non-alphanumeric
+// runs collapsed to single dashes, trimmed, and capped at 60 chars. Falls back to
+// "search" when the result is empty.
+func slugify(s string) string {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevDash = false
+		} else if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if len(slug) > 60 {
+		slug = strings.Trim(slug[:60], "-")
+	}
+	if slug == "" {
+		return "search"
+	}
+	return slug
 }
 
 // search runs a vector search against one codebase (default/selected) or, when all
