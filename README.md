@@ -1,6 +1,6 @@
 # mcp-code-search
 
-MCP server that gives Claude Code semantic code search over any codebase, running 100% locally.
+MCP server that gives Claude Code and Codex semantic code search over any codebase, running 100% locally.
 
 **Default stack:** SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec) (embedded, no server) | Ollama | Go (mcp-go)
 **Optional backend:** Postgres + pgvector (Docker)
@@ -27,10 +27,14 @@ git clone <this-repo>
 cd semantic-codesearch
 go build -o mcp-code-search .
 
-# Print the exact registration command + .mcp.json snippet for this binary:
+# Print the exact registration command + config snippet for this binary:
 ./mcp-code-search mcp
 # ...or register it directly:
 ./mcp-code-search mcp install
+
+# For Codex:
+./mcp-code-search mcp --client codex
+./mcp-code-search mcp install --client codex
 ```
 
 That's it. The server creates `~/.codesearch/` on first index. No containers or ports.
@@ -107,7 +111,7 @@ before destructive actions (`--force` to skip).
 | `prune [--purge] [--force] [--json]` | Deprecate stale codebases (missing root or DB). `--purge` permanently deletes all deprecated data. |
 | `doctor [--json]` | Health check: Ollama reachable, model pulled, output dimension == 768, registry health. Alias `check`. |
 | `pull <model>` | Pull an embedding model into Ollama and verify its dimension. |
-| `mcp [--docker]` / `mcp install [--docker]` | Print (or run) the `claude mcp add` command + `.mcp.json` snippet, for native or Docker/Postgres mode. |
+| `mcp [--client codex] [--docker]` / `mcp install [--client codex] [--docker]` | Print (or run) the registration command for Claude or Codex, plus the matching `.mcp.json` or `config.toml` snippet, for native or Docker/Postgres mode. |
 
 ### Managing & deprecating codebases
 
@@ -167,8 +171,8 @@ All via environment variables (defaults work out of the box):
 
 ```
 ┌─────────────┐     stdio/JSON-RPC     ┌──────────────┐
-│ Claude Code  │◄──────────────────────►│  MCP Server  │
-└─────────────┘                         └──────┬───────┘
+│ Claude/Codex │◄──────────────────────►│  MCP Server  │
+└──────────────┘                        └──────┬───────┘
                                                │
                                     ┌──────────┼──────────┐
                                     ▼                     ▼

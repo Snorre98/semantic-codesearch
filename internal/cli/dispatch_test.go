@@ -21,6 +21,9 @@ func TestDispatchExitCodes(t *testing.T) {
 		{"pull missing arg", []string{"pull"}, 1},
 		{"mcp print native", []string{"mcp"}, 0},
 		{"mcp print docker", []string{"mcp", "--docker"}, 0},
+		{"mcp print codex", []string{"mcp", "--client", "codex"}, 0},
+		{"mcp print codex docker", []string{"mcp", "--client", "codex", "--docker"}, 0},
+		{"mcp bad client", []string{"mcp", "--client", "nope"}, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

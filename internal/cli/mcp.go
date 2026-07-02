@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"semantic-codesearch/internal/config"
@@ -20,9 +21,14 @@ func cmdMCP(args []string) int {
 		args = args[1:]
 	}
 	fs := newFlagSet("mcp")
+	client := fs.String("client", "claude", "registration target: claude or codex")
 	docker := fs.Bool("docker", false, "generate registration for the Docker/Postgres backend")
 	if _, code, ok := parse(fs, args); !ok {
 		return code
+	}
+	target := strings.ToLower(strings.TrimSpace(*client))
+	if target != "claude" && target != "codex" {
+		return errf("unsupported MCP client %q (want claude or codex)", *client)
 	}
 
 	bin, err := os.Executable()
@@ -30,20 +36,24 @@ func cmdMCP(args []string) int {
 		bin = "mcp-code-search"
 	}
 
-	addArgs := registrationArgs(bin, *docker)
+	addArgs := registrationArgs(bin, *docker, target)
 	if doInstall {
-		return runRegistration(addArgs)
+		return runRegistration(target, addArgs)
 	}
-	return printRegistration(bin, *docker, addArgs)
+	return printRegistration(bin, *docker, target, addArgs)
 }
 
-// registrationArgs builds the argument vector for `claude mcp add` (excluding the
-// leading "claude").
-func registrationArgs(bin string, docker bool) []string {
+// registrationArgs builds the argument vector for `<client> mcp add` (excluding the
+// leading client executable).
+func registrationArgs(bin string, docker bool, client string) []string {
 	args := []string{"mcp", "add", mcpServerName}
 	if docker {
-		for k, v := range postgresEnv() {
-			args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
+		envFlag := "-e"
+		if client == "codex" {
+			envFlag = "--env"
+		}
+		for _, kv := range sortedEnvPairs(postgresEnv()) {
+			args = append(args, envFlag, kv)
 		}
 	}
 	return append(args, "--", bin, "serve")
@@ -64,13 +74,31 @@ func postgresEnv() map[string]string {
 	}
 }
 
-func printRegistration(bin string, docker bool, addArgs []string) int {
+func sortedEnvPairs(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	pairs := make([]string, 0, len(keys))
+	for _, k := range keys {
+		pairs = append(pairs, fmt.Sprintf("%s=%s", k, env[k]))
+	}
+	return pairs
+}
+
+func printRegistration(bin string, docker bool, client string, addArgs []string) int {
 	mode := "native (SQLite)"
 	if docker {
 		mode = "Docker/Postgres"
 	}
-	fmt.Printf("# Register mcp-code-search with Claude Code — %s mode\n\n", mode)
-	fmt.Printf("claude %s\n\n", shellJoin(addArgs))
+	clientLabel := map[string]string{
+		"claude": "Claude Code",
+		"codex":  "Codex",
+	}[client]
+	fmt.Printf("# Register mcp-code-search with %s — %s mode\n\n", clientLabel, mode)
+	fmt.Printf("%s %s\n\n", client, shellJoin(addArgs))
 
 	if docker {
 		fmt.Println("# Requires the Postgres + Ollama stack to be running:")
@@ -78,8 +106,14 @@ func printRegistration(bin string, docker bool, addArgs []string) int {
 		fmt.Println()
 	}
 
-	fmt.Println("# Or add this to .mcp.json:")
-	fmt.Println(mcpJSON(bin, docker))
+	if client == "claude" {
+		fmt.Println("# Or add this to .mcp.json:")
+		fmt.Println(mcpJSON(bin, docker))
+		return 0
+	}
+
+	fmt.Println("# Or add this to ~/.codex/config.toml:")
+	fmt.Println(codexTOML(bin, docker))
 	return 0
 }
 
@@ -98,12 +132,28 @@ func mcpJSON(bin string, docker bool) string {
 	return string(b)
 }
 
-func runRegistration(addArgs []string) int {
-	if _, err := exec.LookPath("claude"); err != nil {
-		return errf("`claude` CLI not found on PATH; run the printed command manually:\nclaude %s", shellJoin(addArgs))
+func codexTOML(bin string, docker bool) string {
+	lines := []string{
+		fmt.Sprintf("[mcp_servers.%s]", mcpServerName),
+		fmt.Sprintf("command = %q", bin),
+		`args = ["serve"]`,
 	}
-	fmt.Fprintf(os.Stderr, "running: claude %s\n", shellJoin(addArgs))
-	cmd := exec.Command("claude", addArgs...)
+	if docker {
+		lines = append(lines, "", fmt.Sprintf("[mcp_servers.%s.env]", mcpServerName))
+		for _, kv := range sortedEnvPairs(postgresEnv()) {
+			parts := strings.SplitN(kv, "=", 2)
+			lines = append(lines, fmt.Sprintf("%s = %q", parts[0], parts[1]))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func runRegistration(client string, addArgs []string) int {
+	if _, err := exec.LookPath(client); err != nil {
+		return errf("`%s` CLI not found on PATH; run the printed command manually:\n%s %s", client, client, shellJoin(addArgs))
+	}
+	fmt.Fprintf(os.Stderr, "running: %s %s\n", client, shellJoin(addArgs))
+	cmd := exec.Command(client, addArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin

@@ -32,8 +32,10 @@ Embedding model:
   pull <model>                Pull an embedding model into Ollama
 
 MCP registration:
-  mcp [--docker]              Print the registration command and .mcp.json snippet
-  mcp install [--docker]      Run 'claude mcp add' for this binary
+  mcp [--client codex] [--docker]
+                              Print the registration command and config snippet
+  mcp install [--client codex] [--docker]
+                              Run 'claude mcp add' or 'codex mcp add' for this binary
 
   help                        Show this help
 
