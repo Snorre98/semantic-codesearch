@@ -37,8 +37,9 @@ type FileWithChunks struct {
 // SearchFilters narrows a search. Forward-looking for the roadmap's search
 // filters; currently honored only when non-empty by backends that support it.
 type SearchFilters struct {
-	Language  string
-	ChunkType string
+	Language        string
+	ChunkType       string
+	AreaLikePattern string
 }
 
 // Store is the persistence backend for code embeddings.

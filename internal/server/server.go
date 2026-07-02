@@ -106,6 +106,9 @@ func Run(cfg config.Config) error {
 			mcp.WithBoolean("verbose",
 				mcp.Description("When true, return the full 500-char snippet per result instead of the compact ~3-line/160-char preview. Default false."),
 			),
+			mcp.WithString("area",
+				mcp.Description("Directory path (relative to codebase root) to scope the search, e.g. \"backend\" or \"frontend/components\". Only returns results under this path."),
+			),
 		),
 		func(toolCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := request.GetArguments()
@@ -120,13 +123,14 @@ func Run(cfg config.Config) error {
 			codebase, _ := args["codebase"].(string)
 			all, _ := args["all"].(bool)
 			verbose, _ := args["verbose"].(bool)
+			area, _ := args["area"].(string)
 
 			queryEmbedding, err := embedder.EmbedSingle(query)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
 			}
 
-			results, err := search(toolCtx, cfg, queryEmbedding, limit, codebase, all)
+			results, err := search(toolCtx, cfg, queryEmbedding, limit, codebase, all, area)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
 			}
@@ -208,7 +212,7 @@ func Run(cfg config.Config) error {
 				return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
 			}
 
-			results, err := search(toolCtx, cfg, queryEmbedding, limit, codebase, all)
+			results, err := search(toolCtx, cfg, queryEmbedding, limit, codebase, all, "")
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
 			}
@@ -425,14 +429,24 @@ func slugify(s string) string {
 
 // search runs a vector search against one codebase (default/selected) or, when all
 // is set, across every registered codebase, merging by score.
-func search(ctx context.Context, cfg config.Config, embedding []float32, limit int, codebase string, all bool) ([]models.SearchResult, error) {
+func search(ctx context.Context, cfg config.Config, embedding []float32, limit int, codebase string, all bool, area string) ([]models.SearchResult, error) {
 	if !sqliteBackend(cfg) {
 		st, err := store.Open(ctx, cfg, "")
 		if err != nil {
 			return nil, err
 		}
 		defer st.Close()
-		return st.Search(ctx, embedding, limit, store.SearchFilters{})
+		var pattern string
+		if area != "" {
+			reg, err := store.LoadRegistry(cfg)
+			if err != nil {
+				return nil, err
+			}
+			if e, ok := mostRecentMatching(reg, cfg); ok {
+				pattern = filepath.Join(e.Root, area) + "/%"
+			}
+		}
+		return st.Search(ctx, embedding, limit, store.SearchFilters{AreaLikePattern: pattern})
 	}
 
 	reg, err := store.LoadRegistry(cfg)
@@ -475,7 +489,11 @@ func search(ctx context.Context, cfg config.Config, embedding []float32, limit i
 		if err != nil {
 			return nil, err
 		}
-		res, serr := st.Search(ctx, embedding, limit, store.SearchFilters{})
+		f := store.SearchFilters{}
+		if area != "" {
+			f.AreaLikePattern = filepath.Join(root, area) + "/%"
+		}
+		res, serr := st.Search(ctx, embedding, limit, f)
 		st.Close()
 		if serr != nil {
 			return nil, serr

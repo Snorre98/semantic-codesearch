@@ -199,16 +199,20 @@ func (s *sqliteStore) storeFilesTx(ctx context.Context, tx *sql.Tx, files []File
 	return storedFiles, storedChunks, nil
 }
 
-func (s *sqliteStore) Search(ctx context.Context, embedding []float32, limit int, _ SearchFilters) ([]models.SearchResult, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT f.file_path, c.start_line, c.end_line, c.content, c.symbol_name, c.chunk_type, v.distance
+func (s *sqliteStore) Search(ctx context.Context, embedding []float32, limit int, f SearchFilters) ([]models.SearchResult, error) {
+	q := `SELECT f.file_path, c.start_line, c.end_line, c.content, c.symbol_name, c.chunk_type, v.distance
 		 FROM vec_chunks v
 		 JOIN code_chunks c ON c.id = v.chunk_id
 		 JOIN indexed_files f ON f.id = c.file_id
-		 WHERE v.embedding MATCH ? AND k = ?
-		 ORDER BY v.distance`,
-		serializeFloat32(embedding), limit,
-	)
+		 WHERE v.embedding MATCH ? AND k = ?`
+	args := []any{serializeFloat32(embedding), limit}
+	if f.AreaLikePattern != "" {
+		q += " AND f.file_path LIKE ?"
+		args = append(args, f.AreaLikePattern)
+	}
+	q += " ORDER BY v.distance"
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search query: %w", err)
 	}

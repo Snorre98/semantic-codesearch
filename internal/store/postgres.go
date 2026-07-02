@@ -145,10 +145,9 @@ func insertChunks(ctx context.Context, q querier, fileID int, chunks []ChunkReco
 	return nil
 }
 
-func (s *postgresStore) Search(ctx context.Context, embedding []float32, limit int, _ SearchFilters) ([]models.SearchResult, error) {
+func (s *postgresStore) Search(ctx context.Context, embedding []float32, limit int, f SearchFilters) ([]models.SearchResult, error) {
 	vec := pgvector.NewVector(embedding)
-	rows, err := s.pool.Query(ctx,
-		`SELECT
+	q := `SELECT
 			f.file_path,
 			c.start_line,
 			c.end_line,
@@ -162,11 +161,16 @@ func (s *postgresStore) Search(ctx context.Context, embedding []float32, limit i
 			SELECT 1 FROM codebases cb
 			WHERE cb.status = 'deprecated'
 			  AND (f.file_path = cb.root OR f.file_path LIKE cb.root || '/%')
-		)
-		ORDER BY c.embedding <=> $1
-		LIMIT $2`,
-		vec, limit,
-	)
+		)`
+	args := []any{vec, limit}
+	if f.AreaLikePattern != "" {
+		q += " AND f.file_path LIKE $3"
+		args = []any{vec, limit, f.AreaLikePattern}
+	}
+	q += ` ORDER BY c.embedding <=> $1
+		LIMIT $2`
+
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search query: %w", err)
 	}
