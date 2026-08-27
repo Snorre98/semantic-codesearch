@@ -6,8 +6,8 @@ services:
       POSTGRES_DB: codesearch
       POSTGRES_USER: codesearch
       POSTGRES_PASSWORD: codesearch
-    ports:
-      - "5433:5432"
+    # No host port mapping — only accessible via Docker network.
+    # Uncomment for local debugging: ports: ["5433:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
@@ -16,7 +16,49 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - codesearch
+
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: mcp-code-search-ollama
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - codesearch
+    profiles:
+      - ollama
+
+  mcp-server:
+    build: .
+    image: mcp-code-search:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MCP_CS_PG_HOST: postgres
+      MCP_CS_PG_PORT: "5432"
+    stdin_open: true
+    networks:
+      - codesearch
+    profiles:
+      - build-only
 
 volumes:
   pgdata:
     name: mcp-codesearch-pgdata
+  ollama_data:
+    name: mcp-codesearch-ollama-data
+
+networks:
+  codesearch:
+    name: codesearch
+    driver: bridge
