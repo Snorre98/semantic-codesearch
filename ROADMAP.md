@@ -20,17 +20,6 @@ The semantic search becomes the agent's memory of the codebase. That's the missi
 - LLM integration for the actual code generation (Claude API)
 - Webhook for push events to keep the index updated automatically
 
-### Why this is commercially interesting
-
-- It's not just a search tool anymore — it's an autonomous developer
-- GitHub Apps have built-in distribution (marketplace)
-- Per-repo or per-org subscription model
-- The index is the moat — your agent has deeper codebase understanding than competitors doing naive RAG
-
-### Risk
-
-This is exactly what Copilot Workspace, Devin, Factory, CodeGen, and a dozen well-funded startups are building. The question is whether you can find a niche (specific languages, specific workflows, small teams underserved by enterprise tools) or move faster on the MCP/Claude integration angle that nobody else has.
-
 ---
 
 Future extensions for mcp-code-search, roughly ordered by impact and complexity.

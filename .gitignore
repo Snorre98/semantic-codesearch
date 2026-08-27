@@ -18,3 +18,9 @@ pgdata/
 
 # Claude
 .claude
+
+# macOS
+.DS_Store
+
+# Benchmark output (machine-generated, contains local paths)
+benchmarks/runs.jsonl
